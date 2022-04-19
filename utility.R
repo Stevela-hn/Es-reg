@@ -105,7 +105,7 @@ es_reg <- function(X, Y, alpha=0.5, robust=TRUE, method='adaptive')
         fitting = adaHuber.reg(X, Ynew, method='adaptive')
         es_coef = fitting$coef
         true_tau <- fitting$tau
-        return(true_tau)
+        print(true_tau)
         # es_coef = huber.reg(X, Ynew, method='adaptive')
         } else if (method == 'naive') {
           n <- nrow(X)
@@ -114,10 +114,51 @@ es_reg <- function(X, Y, alpha=0.5, robust=TRUE, method='adaptive')
           es_coef = hub_reg(alpha*X, alpha*Ynew, c=tau)$coef
           es_coef[1] = es_coef[1]/alpha
         }
-    }
+      }
   outlist<-list(coef_q=matrix(qr_fit$coef), coef_e=matrix(es_coef))
   return(outlist)
 }
+
+give_tau <- function(X, Y, alpha=0.5, robust=TRUE, method='adaptive')
+  ####################################################################
+########## Joint quantile & expected shortfall regression ########## 
+####################################################################
+## Input 
+# X : n by p design matrix
+# Y : n by 1 response vector
+# alpha : quantile level between 0 and 1
+# robust : logical flag for returning a robust ES estimator
+# method : tuning methods ('adaptive' & 'naive') for choosing the robustification parameter
+
+## Output
+# coefficients : estimated regression coefficients 
+# residuals : fitted residuals
+{
+  qr_fit  = conquer(X, Y, tau=alpha)
+  qr_nres = qr_fit$res * (qr_fit$res <= 0)
+  Ynew    = qr_nres/alpha + (Y - qr_fit$res)
+  
+  if (robust == FALSE){
+    es_coef = lm(Ynew~X)$coef
+  } else {
+    if (method == 'adaptive'){
+      fitting = adaHuber.reg(X, Ynew, method='adaptive')
+      es_coef = fitting$coef
+      true_tau <- fitting$tau
+      return(true_tau)
+      # es_coef = huber.reg(X, Ynew, method='adaptive')
+    } else if (method == 'naive') {
+      n <- nrow(X)
+      p <- ncol(X)
+      tau = sd(qr_nres) * sqrt(n / (p + log(n)))
+      es_coef = hub_reg(alpha*X, alpha*Ynew, c=tau)$coef
+      es_coef[1] = es_coef[1]/alpha
+    }
+  }
+  outlist<-list(coef_q=matrix(qr_fit$coef), coef_e=matrix(es_coef))
+  return(outlist)
+}
+
 
 es_norm <- function(alpha=0.5, loc=0, sd=1){
   return(loc - sd * dnorm(qnorm(alpha)) / alpha)  
@@ -139,14 +180,7 @@ unif_sphere <- function(p=1){
 
 
 #new
-# Esreg Simulation
-esreg_simulation <- function(Z, y) {
-  fit <- esreg(y ~ Z, alpha = 0.1)
-  coefs = fit$coefficients
-  return(coefs)
-}
-
-
+# Es-reg functions
 huber_loss <- function(S, tau) {
   binary_1 <- 1*(abs(S) <= tau)
   binary_2 <- 1*(abs(S) > tau)
@@ -179,26 +213,17 @@ orthogonal_score <- function(theta, beta_hat, X, y, alpha) {
   
   factor_1 <- alpha * X_mul_theta
   factor_2 <- multiplier_vec * y
-  factor_3 <- (multiplier_vec - alpha) * X_mul_beta
-  return(factor_1 - factor_2 + factor_3)
+  factor_3 <- (alpha - multiplier_vec) * X_mul_beta# (multiplier_vec - alpha) * X_mul_beta
+  return(-factor_1 + factor_2 + factor_3)
 }
 
 solve_tau <- function(tau, w, n, p) {
   delta = 1/n
-  RHS = (p + log(delta^(-1)))
+  RHS = (p + log10(delta^(-1)))
   with_tau = sum(1*(abs(w) >= tau))
-  with_w = sum((w*(1*(tau > abs(w))))^2)
+  with_w = sum((abs(w)*(1*(tau > abs(w))))^2)
   sol = (with_w / (RHS - with_tau))^(0.5)
   return(sol)
-}
-
-single_huber <- function(x) {
-  tau=70
-  if (abs(x) <= tau) {
-    return(0.5*x^(0.5))
-  } else {
-    return(tau*(abs(x) - 0.5*tau))
-  }
 }
 
 calc_residual <- function(Z, y, alpha, theta) {
@@ -217,55 +242,57 @@ min_max_normalize <- function(Z) {
   return(Z)
 }
 
-f <- function(tau){
-  # print(w)
-  return(abs((sum((w*(abs(w) <= tau))^2) + sum((tau*(abs(w) > tau))^2))/(n*(tau^2)) - (p+log(n))/n))
-}
-
-f_gd <- function(tau, w) {
-  n = length(w)
-  contant = (-2)*(w*(abs(w) < tau))^2
-  return(sum(contant*(tau)^(-3)) / n)
-}
-
-tau_optim <- function(w) {
-  # tau = 5
-  gd_prev <- 1
-  tau_prev <- 20
-  alpha <- 1
-  loss <- rep(0, 100)
-  for (i in 1:100) {
-    gd <- f_gd(tau, w)
-    loss[i] = f(tau, w) - 0
+bisection <- function(a, b, f, n, p, res, tol, max_iter) {
+  left = a
+  right = b
+  for (i in 1:max_iter) {
+    c = (left + right) / 2
+    cur = f(c, res, n, p)
+    if (abs(cur) < tol) {
+      # print('root found!')
+      break
+    }
+    if (f(left, res, n, p)*cur < 0) {
+      right = c
+    }
+    if (cur * f(right, res, n, p) < 0) {
+      left = c
+    }
   }
-  plot(loss)
-  return(tau)
+  return(c)
+}
+
+func <- function(tau, res, n, p) {
+  delta = 1/n
+  RHS = p + log(delta^(-1))
+  with_tau = sum(1*(abs(res) >= tau))
+  with_w = sum((res*(1*(tau > abs(res))))^2/tau^2)
+  return((with_w + with_tau)/n - RHS/n)
 }
 
 # core
-es_reg_new <- function(Z, y, epochs=100, alpha=0.05) {
+es_reg_new <- function(Z, y, epochs=150, alpha=0.05) {
+  # tau = give_tau(Z, y, alpha = alpha, method = 'adaptive')
   
   qr_fit = conquer(Z, y, tau=alpha)
   qr_nres = qr_fit$res * (qr_fit$res <= 0)
-  y = qr_nres/alpha + (y - qr_fit$res)
-  #y = qr_nres + alpha*(y - qr_fit$res)
+  # y = qr_nres/alpha + (y - qr_fit$res)
+  y = qr_nres + alpha*(y - qr_fit$res)
   
   bq_beta <- qr_fit$coeff
-  theta <- as.vector(rep(0, length(bq_beta)))
+  theta <- bq_beta #as.vector(rep(0, length(bq_beta)))
   beta_hat <- bq_beta
   losses <- c()
   early_stopping_count <- 0
   cur_min <- 10000
   x_axes <- 1
-  
-  # tau = 60
+  # tau = 50 # not robust
   
   ones = rep(1, times=length(Z[,1]))
-  old_Z = Z
+
   Z = cbind(ones, Z)
   
-  tau = es_reg(old_Z, y, alpha=alpha, method='adaptive')
-  print(tau)
+  # return(es_reg_cf(Z, y, alpha, qr_fit$coeff))
   
   for (i in 1:epochs) {
     # get loss --> Ortho;Huber loss
@@ -274,15 +301,26 @@ es_reg_new <- function(Z, y, epochs=100, alpha=0.05) {
     n <- length(Z[,1])
     gd <- rep(0, length(Z[1,]))
     
-    w = calc_residual(Z, y, alpha, theta)
+    # -------------------------------------------------------------
+    res = calc_residual(Z, y, alpha, theta)
+    # tau = solve_tau(tau, res, n, p)
     
-    #if (i == 1){
-    #f <- function(tau){
-      # print(w)
-      #return((sum((w*(abs(w) <= tau))^2) + sum((tau*(abs(w) > tau))^2))/(n*(tau^2)) - (p+log(n))/n)
-    #}
-    #tau = spg(par = 70, fn = f, quiet = TRUE)$par}
-    # print(tau)
+    # func <- function(tau) {
+      # delta = 1/n
+      # RHS = p + log(delta^(-1))
+      # with_tau = sum(1*(abs(res) >= tau))
+      # with_w = sum((res*(1*(tau > abs(res))))^2/tau^2)
+      # return(abs(with_w + with_tau - RHS))
+    # }
+    
+    if (i == 1) {
+      tau = bisection(3, 200, func, n, p+1, res, 0.000000001, 100)
+      # tau = BBoptim(par=100, fn=func, quiet=TRUE, lower=50)$par
+      # print(tau)
+    }
+    
+    
+    # -------------------------------------------------------------
     
     S_vec <- orthogonal_score(theta, beta_hat, Z, y, alpha)
     
@@ -297,7 +335,11 @@ es_reg_new <- function(Z, y, epochs=100, alpha=0.05) {
     summation_gd <- huber_loss_second_gd(S_vec, tau=tau)
     avg_gd <- summation_gd / n
     
-    theta <- theta - (1/avg_gd) * RHS
+    theta <- theta + (1/avg_gd) * RHS
+    
+    # print((1/avg_gd) * RHS)
+    
+    # sqrt(sum(loss_vec^2))
     
     # normalize the vector to record
     loss_per_epoch <- sum(loss_vec)
@@ -319,7 +361,21 @@ es_reg_new <- function(Z, y, epochs=100, alpha=0.05) {
     }
   }
   
-  #plot(losses, type='l', main = 'Loss Plot', xlab = 'Epoch', ylab = 'Loss')
-  # print(tau)
+  plot(losses, type='l', main = 'Loss Plot', xlab = 'Epoch', ylab = 'Loss')
+  print(tau)
   return(theta)
+}
+
+es_reg_cf <- function(X, y, alpha, beta) {
+  LHS = inv(t(X) %*% X) * (1/alpha)
+  cond = 1*(y <= X %*% beta)
+  vec = y - X %*% beta
+  # print(diag(vec))
+  overall = rep(0, length(y))
+  for (i in 1:length(overall)) {
+    overall[i] = vec[i] * cond[i]
+  }
+  # overall = diag(vec) %*% cond
+  RHS = t(X) %*% overall
+  return(beta + LHS %*% RHS)
 }
